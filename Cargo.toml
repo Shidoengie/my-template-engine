@@ -1,0 +1,11 @@
+[package]
+name = "template-engine"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ariadne = "0.6.0"
+chumsky = "0.12.0"
+clap = { version = "^4.5.58", features = ["derive"] }
+rayon = "1.11.0"
+slab = "0.4.12"
