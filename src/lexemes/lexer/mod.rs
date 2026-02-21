@@ -14,10 +14,10 @@ pub struct Lexer<'a> {
     file_id: FileID,
     chars: Chars<'a>,
     source: String,
-    index: usize,
+    pub(crate) index: usize,
 }
 impl<'a> Lexer<'a> {
-    fn peek_char(&self) -> Option<char> {
+    pub(crate) fn peek_char(&self) -> Option<char> {
         self.chars.clone().next()
     }
     fn peek_advance(&mut self) -> Option<char> {
@@ -28,7 +28,7 @@ impl<'a> Lexer<'a> {
         let inner = err.to_spanned(self.new_span(start, stop));
         Err(Box::new(inner) as Box<_>)
     }
-    fn peek_next(&mut self) -> Option<char> {
+    fn peek_next_char(&mut self) -> Option<char> {
         let mut cur_chars = self.chars.clone();
         cur_chars.next();
         cur_chars.next()
@@ -43,7 +43,7 @@ impl<'a> Lexer<'a> {
         }
         return Ok(advanced);
     }
-    fn advance(&mut self) -> Option<char> {
+    pub(crate) fn advance(&mut self) -> Option<char> {
         self.index += 1;
         self.chars.next()
     }
@@ -68,7 +68,7 @@ impl<'a> Lexer<'a> {
             }
 
             if value == '.' {
-                let Some(next) = self.peek_next() else {
+                let Some(next) = self.peek_next_char() else {
                     return self.make_error(LexError::InvalidNumber, start, self.index);
                 };
                 if !next.is_ascii_digit() {
@@ -108,7 +108,7 @@ impl<'a> Lexer<'a> {
         let Some(span) = self.source.get(start..stop) else {
             return self.make_error(LexError::InvalidIdent, start, stop);
         };
-        let kind = tokens::map_keyword(span).unwrap_or(TokenType::Identifier);
+        let kind = tokens::map_keyword(span).unwrap_or(TokenType::Word);
         Ok(Token::new(kind, self.new_span(start, stop)))
     }
     fn lex_string(&mut self, quote: char) -> Result {
@@ -187,21 +187,7 @@ impl<'a> Lexer<'a> {
         }
         self.make_error(LexError::UnexpectedChar(expected), start - 1, start)
     }
-    fn matches_comment(&mut self, mut nest: i32, advanced: char, next: char) -> i32 {
-        match (advanced, next) {
-            ('*', '>') => {
-                nest -= 1;
-            }
-            ('<', '*') => {
-                nest += 1;
-            }
-            _ => {
-                return nest;
-            }
-        }
-        self.advance();
-        nest
-    }
+
     fn multi_comment(&mut self) -> Result {
         self.consume_char('*')?;
         let mut nest = 1;
@@ -213,7 +199,7 @@ impl<'a> Lexer<'a> {
             };
             match peeked {
                 '*' => {
-                    let Some(peeked) = self.peek_next() else {
+                    let Some(peeked) = self.peek_next_char() else {
                         self.advance();
                         continue;
                     };
@@ -227,7 +213,7 @@ impl<'a> Lexer<'a> {
                     let _ = self.advance();
                 }
                 '<' => {
-                    let Some(peeked) = self.peek_next() else {
+                    let Some(peeked) = self.peek_next_char() else {
                         self.advance();
                         continue;
                     };
@@ -244,7 +230,6 @@ impl<'a> Lexer<'a> {
                 }
             }
         }
-        dbg!(&self.chars);
         return Ok(Token::new(TokenType::Comment, self.new_span(start, end)));
     }
 
@@ -282,6 +267,9 @@ impl<'a> Lexer<'a> {
             '?' => just(T::Question),
             '!' => just(T::Bang),
 
+            '\r' => self.multi_char_token('\n', T::Space, T::NewLine, start),
+            '\n' => just(T::NewLine),
+            ' ' | '\t' => just(T::Space),
             '*' => just(T::Star),
             '-' => {
                 let Some(peeked) = self.peek_char() else {
@@ -296,20 +284,21 @@ impl<'a> Lexer<'a> {
             '/' => just(T::Slash),
             '=' => just(T::Equal),
             '<' => self.lex_lesser_token(range),
-            ' ' | '\t' | '\r' | '\n' => self.next(),
             last => self.ident_or_num(last),
         }
     }
     fn lex_end_token(&mut self, range: Span) -> Result {
-        let Some(peeked) = self.peek_char() else {
+        let Some(peeked) = self.peek_next_char() else {
             return Ok(Token::new(TokenType::Lesser, range));
         };
+
         if peeked != '>' {
             return Ok(Token::new(TokenType::Lesser, range));
         }
         self.advance();
         self.advance();
-        let span = range + self.index;
+        let mut span = range;
+        span.end = self.index;
         return Ok(Token::new(TokenType::End, span));
     }
     fn lex_lesser_token(&mut self, range: Span) -> Result {
@@ -322,8 +311,22 @@ impl<'a> Lexer<'a> {
             _ => Ok(Token::new(TokenType::Lesser, range)),
         }
     }
+    pub fn peek_next(&mut self) -> Result {
+        let old_chars = self.chars.clone();
+        let old_index = self.index;
+        self.next()?;
+        let token = self.next()?;
+        self.chars = old_chars;
+        self.index = old_index;
+        Ok(token)
+    }
     pub fn peek(&mut self) -> Result {
-        self.clone().next()
+        let old_chars = self.chars.clone();
+        let old_index = self.index;
+        let token = self.next()?;
+        self.chars = old_chars;
+        self.index = old_index;
+        Ok(token)
     }
     pub fn next(&mut self) -> Result {
         let start = self.index;

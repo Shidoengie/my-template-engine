@@ -8,7 +8,7 @@ pub enum TokenType {
     Dollar,
     Float,
     Int,
-    Identifier,
+    Word,
     Minus,
     Star,
     Slash,
@@ -35,6 +35,8 @@ pub enum TokenType {
     Eof,
     Comment,
     End,
+    Space,
+    NewLine,
 }
 
 impl TokenType {
@@ -59,9 +61,28 @@ impl std::fmt::Debug for Token {
 }
 
 pub trait TokenEq {
+    /// Determines if the token is of kind in `kind`.
     fn is(&self, kind: &TokenType) -> bool;
-    fn is_any(&self, matches: &[TokenType]) -> bool;
-    fn isnt(&self, kind: &TokenType) -> bool;
+    /// Determines if the token matches any of kinds in `matches`.
+    fn is_any(&self, matches: impl AsRef<[TokenType]>) -> bool;
+    /// Determines if the token is significant.
+    ///
+    /// Tokens that are of kind [`TokenType::Space`], [`TokenType::Space`], [`TokenType::NewLine`] arent significant.
+    fn is_significant(&self) -> bool {
+        self.isnt_any(&[TokenType::Comment, TokenType::Space, TokenType::NewLine])
+    }
+    /// Inverse of [`Self::is`].
+    fn isnt(&self, kind: &TokenType) -> bool {
+        return !self.is(kind);
+    }
+    /// Inverse of [`Self::is_significant`].
+    fn isnt_significant(&self) -> bool {
+        !self.is_significant()
+    }
+    /// Inverse of [`Self::is_any`].
+    fn isnt_any(&self, matches: impl AsRef<[TokenType]>) -> bool {
+        return !self.is_any(matches);
+    }
 }
 impl Token {
     pub fn new(kind: TokenType, span: Span) -> Self {
@@ -72,33 +93,24 @@ impl Token {
     }
 }
 impl TokenEq for Token {
-    fn is_any(&self, matches: &[TokenType]) -> bool {
-        matches.contains(&self.kind)
+    fn is_any(&self, matches: impl AsRef<[TokenType]>) -> bool {
+        matches.as_ref().contains(&self.kind)
     }
     fn is(&self, kind: &TokenType) -> bool {
         &self.kind == kind
     }
-    fn isnt(&self, kind: &TokenType) -> bool {
-        &self.kind != kind
-    }
 }
 
 impl TokenEq for Option<Token> {
-    fn is_any(&self, matches: &[TokenType]) -> bool {
+    fn is_any(&self, matches: impl AsRef<[TokenType]>) -> bool {
         let Some(kind) = self else {
             return false;
         };
-        kind.is_any(matches)
+        kind.is_any(matches.as_ref())
     }
     fn is(&self, kind: &TokenType) -> bool {
         match self.clone() {
             Some(tok) => &tok.kind == kind,
-            None => false,
-        }
-    }
-    fn isnt(&self, kind: &TokenType) -> bool {
-        match self.clone() {
-            Some(tok) => &tok.kind != kind,
             None => false,
         }
     }

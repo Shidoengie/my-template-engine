@@ -25,13 +25,12 @@ enum Stage {
     Ast,
 }
 
-/// If the result is Ok, pretty-prints the value. On Err, does nothing.
 fn print_if_ok<T: Debug, E>(result: Result<T, E>) {
     if let Ok(value) = result {
         println!("{value:#?}");
     }
 }
-/// If the result is Ok, pretty-prints the value. On Err, does nothing.
+
 fn display_if_ok<T: Display, E>(result: Result<T, E>) {
     if let Ok(value) = result {
         println!("{value}");

@@ -4,7 +4,7 @@ use crate::{
     ast::nodes::*,
     lang_errors::LangError,
     lexemes::{lexer::Lexer, tokens::*},
-    spans::{FileID, IntoSpanned, Spanned},
+    spans::{FileID, IntoSpanned, Span, Spanned},
 };
 
 mod error;
@@ -51,6 +51,10 @@ impl<'input> Parser<'input> {
     fn peek(&mut self) -> Result<Token> {
         self.tokens.peek()
     }
+    /// peeks the next token
+    fn peek_next(&mut self) -> Result<Token> {
+        self.tokens.peek_next()
+    }
     /// peeks the current token, and, if theres any token that is not [`TokenType::Eof`] it will return [`Some`] else [`None`]
     fn peek_opt(&mut self) -> Result<Option<Token>> {
         let ok = self.tokens.peek()?;
@@ -63,24 +67,32 @@ impl<'input> Parser<'input> {
     /// this is used for expressions that require the existence of a current token
     fn peek_some(&mut self) -> Result<Token> {
         let peeked = self.peek()?;
-        if peeked.is(&TokenType::Eof) {
+        if !peeked.exists() {
             return err(ParseError::UnexpectedStreamEnd.to_spanned(peeked.span));
         }
         Ok(peeked)
     }
-    /// advances to the next token
+    /// advances to the next meaningful token
+    ///
     fn next_significant(&mut self) -> Result<Token> {
-        let mut tok = self.tokens.next()?;
-        while tok.is(&TokenType::Comment) {
-            tok = self.tokens.next()?;
+        let mut token = self.tokens.next()?;
+        while token.isnt_significant() {
+            token = self.tokens.next()?;
         }
-        return Ok(tok);
+        return Ok(token);
     }
-    fn skip_comment(&mut self) -> Result<Option<Token>> {
-        if self.peek()?.is(&TokenType::Comment) {
-            return Ok(Some(self.next()?));
+    fn skip_unsignificant(&mut self) -> Result<Vec<Token>> {
+        let mut buffer: Vec<Token> = vec![];
+        if self.peek()?.is_significant() {
+            return Ok(buffer);
         }
-        return Ok(None);
+        while let Some(token) = self.peek_opt()? {
+            if token.is_significant() {
+                return Ok(buffer);
+            }
+            buffer.push(self.next()?);
+        }
+        Ok(buffer)
     }
     fn next(&mut self) -> Result<Token> {
         self.tokens.next()
@@ -119,48 +131,65 @@ impl<'input> Parser<'input> {
         Ok(token)
     }
 
-    fn consume_ident(&mut self) -> Result<String> {
-        let token = self.expect(TokenType::Identifier)?;
+    fn consume_word(&mut self) -> Result<String> {
+        let token = self.expect(TokenType::Word)?;
         self.next()?;
         Ok(self.text(&token))
     }
-    pub(crate) fn parse_text(&mut self) -> Result {
-        let mut buffer: Vec<String> = Vec::new();
-        let start_span = self.peek()?.span;
-        let mut end_span = start_span.clone();
-        while let Some(tok) = self.peek_opt()? {
-            if !tok.exists() {
+    pub fn parse_raw_text(&mut self) -> Result {
+        let mut buffer = String::new();
+        let start_index = self.tokens.index;
+        while let Some(ch) = self.tokens.peek_char() {
+            if ch == '<' {
                 break;
             }
-            if tok.is(&TokenType::Comment) {
+            buffer.push(ch);
+            self.tokens.advance();
+        }
+        let end_index = self.tokens.index;
+        let span = Span::new(self.file_id, start_index, end_index);
+        let node = Node::Text(buffer).to_spanned(span);
+        dbg!(self.peek());
+        Ok(node)
+    }
+    pub fn parse_text(&mut self) -> Result {
+        let mut buffer = String::new();
+        let start_span = self.peek()?.span;
+        let mut end_span = start_span.clone();
+        while let Some(token) = self.peek_opt()? {
+            if !token.exists() {
+                break;
+            }
+            if token.is(&TokenType::Comment) {
                 continue;
             }
-            let text = self.text(&tok);
-            buffer.push(text);
+            let text = self.text(&token);
+            buffer += &text;
             let advanced = self.next()?;
             end_span = advanced.span;
             if self
                 .peek()?
-                .is_any(&[TokenType::Lesser, TokenType::Greater])
+                .is_any(&[TokenType::Lesser, TokenType::Greater, TokenType::End])
             {
                 break;
             }
         }
-        let text = buffer.join(" ");
-        return Ok(Node::Text(text).to_spanned(start_span + end_span));
+        buffer = buffer.trim().to_owned();
+        return Ok(Node::Text(buffer).to_spanned(start_span + end_span));
     }
     /// Parses element properties like `a = 1`
     fn parse_props(&mut self) -> Result<HashMap<String, Spanned<Value>>> {
         let mut props: HashMap<String, Spanned<Value>> = HashMap::new();
 
-        while let Some(tok) = self.peek_opt()? {
-            if tok.is(&TokenType::Lesser) {
+        while let Some(token) = self.peek_opt()? {
+            self.skip_unsignificant()?;
+            if token.is(&TokenType::Greater) {
                 self.next()?;
                 break;
             }
-            let prop_name = self.consume_ident()?;
 
-            self.skip_comment()?;
+            let prop_name = self.consume_word()?;
+            self.skip_unsignificant()?;
             let sign = self.peek()?;
             if sign.isnt(&TokenType::Equal) {
                 props.insert(prop_name, Value::Bool(true).to_spanned(sign.span));
@@ -174,23 +203,33 @@ impl<'input> Parser<'input> {
         }
         return Ok(props);
     }
-    fn parse_content(&mut self) -> Result<Vec<Spanned<Node>>> {
+    fn parse_content(&mut self, raw: bool) -> Result<Vec<Spanned<Node>>> {
         let mut children: Vec<Spanned<Node>> = vec![];
-        while let Some(tok) = self.peek_opt()? {
-            if tok.is(&TokenType::End) || !tok.exists() {
+        while let Some(token) = self.peek_opt()? {
+            if token.is(&TokenType::End) || !token.exists() {
+                self.next()?;
                 break;
             }
-            let parsed = self.parse_expr()?;
+
+            let parsed = self.parse_expr(raw)?;
             children.push(parsed);
         }
         Ok(children)
     }
     fn parse_element(&mut self) -> Result {
-        let start = self.next()?;
+        let next = self.peek_next()?;
+        if !next.exists() || next.is(&TokenType::Greater) {
+            let token = self.next()?;
+            let text = self.text(&token);
+            let node = Node::Text(text).to_spanned(token.span);
+            return Ok(node);
+        }
 
-        let tag_name = self.consume_ident()?;
+        let start = self.next()?;
+        let tag_name = self.consume_word()?;
+        let parse_raw = tag_name == "pre";
         let props = self.parse_props()?;
-        let children = self.parse_content()?;
+        let children = self.parse_content(parse_raw)?;
         let end = self.next()?;
         let element = Element {
             name: tag_name,
@@ -204,21 +243,25 @@ impl<'input> Parser<'input> {
         let value = match &token.kind {
             TokenType::False => Ok(Value::Bool(false)),
             TokenType::True => Ok(Value::Bool(true)),
+            TokenType::Null => Ok(Value::Null),
+            TokenType::Float => Ok(self.parse_float(token)),
+            TokenType::Int => Ok(self.parse_int(token)),
             TokenType::Str(txt) => Ok(Value::String(txt.to_string())),
             _ => todo!(),
         }?;
         Ok(value.to_spanned(token.span))
     }
-    fn parse_expr(&mut self) -> Result {
+    fn parse_expr(&mut self, raw: bool) -> Result {
         let peeked = self.peek()?;
         match peeked.kind {
             TokenType::Lesser => self.parse_element(),
-
             TokenType::Comment => {
                 let text = self.text(&peeked);
                 self.next()?;
                 return Ok(Node::Comment(text).to_spanned(peeked.span));
             }
+
+            _ if raw => self.parse_raw_text(),
             _ => self.parse_text(),
         }
     }
@@ -230,6 +273,6 @@ impl<'input> Parser<'input> {
             input,
             tokens: Lexer::new(input, file_id),
         };
-        parser.parse_content()
+        parser.parse_content(false)
     }
 }

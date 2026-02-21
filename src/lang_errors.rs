@@ -6,7 +6,7 @@ pub trait LangError
 where
     Self: SpanUtil + Debug,
 {
-    fn msg(&self) -> Report<Span>;
+    fn msg(&'_ self) -> Report<'_, Span>;
 }
 
 pub struct MsgBuilder<'a> {
