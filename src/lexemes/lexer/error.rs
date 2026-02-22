@@ -1,6 +1,6 @@
 use crate::{
     lang_errors::{LangError, MsgBuilder},
-    spans::Spanned,
+    spans::*,
 };
 #[derive(Debug)]
 pub enum LexError {
@@ -12,7 +12,7 @@ pub enum LexError {
     UnexpectedStreamEnd,
 }
 impl LangError for Spanned<LexError> {
-    fn msg(&self) -> ariadne::Report<crate::spans::Span> {
+    fn msg(&'_ self) -> ariadne::Report<'_, Span> {
         use LexError as Le;
         match self.item {
             Le::InvalidIdent => MsgBuilder::build_err("Invalid identifier", self.span)
@@ -22,14 +22,18 @@ impl LangError for Spanned<LexError> {
             Le::InvalidNumber => MsgBuilder::build_err("Invalid number", self.span)
                 .with_err_label("This is not a valid number.")
                 .finish(),
-            Le::UnexpectedStreamEnd => MsgBuilder::build_err("Expected ", self.span).finish(),
+            Le::UnexpectedStreamEnd => {
+                MsgBuilder::build_err("Unexpected end of character stream", self.span)
+                    .with_err_label("Expected more tokens here.")
+                    .finish()
+            }
             Le::UnexpectedChar(c) => {
-                MsgBuilder::build_err(format!("Unexpected char {c}"), self.span)
+                MsgBuilder::build_err(format!("Unexpected char '{c}'"), self.span)
                     .with_err_label("This should not be here.")
                     .finish()
             }
             Le::UnterminatedStr(c) => MsgBuilder::build_err("Unterminated string", self.span)
-                .with_err_label(format!("Missing {c}."))
+                .with_err_label(format!("Missing '{c}'."))
                 .finish(),
             Le::InvalidEscape => MsgBuilder::build_err("Invalid escape sequence", self.span)
                 .with_err_label("This is not a valid escape sequence.".to_string())

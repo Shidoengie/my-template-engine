@@ -42,7 +42,7 @@ impl<'a> MsgBuilder<'a> {
     pub fn finish(self) -> Report<'a, Span> {
         self.inner.finish()
     }
-    ///[`ReportBuilder::with_help`]
+    ///[`ReportBuilder::with_code`]
     pub fn with_code(mut self, code: impl Display) -> Self {
         self.inner = self.inner.with_code(code);
 

@@ -37,11 +37,19 @@ pub enum TokenType {
     End,
     Space,
     NewLine,
+    LCloser,
+    RCloser,
 }
 
 impl TokenType {
     pub fn to_token(self, span: Span) -> Token {
         Token::new(self, span)
+    }
+}
+
+impl AsRef<TokenType> for TokenType {
+    fn as_ref(&self) -> &TokenType {
+        &self
     }
 }
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -62,9 +70,24 @@ impl std::fmt::Debug for Token {
 
 pub trait TokenEq {
     /// Determines if the token is of kind in `kind`.
-    fn is(&self, kind: &TokenType) -> bool;
+    fn is(&self, kind: impl AsRef<TokenType>) -> bool;
     /// Determines if the token matches any of kinds in `matches`.
     fn is_any(&self, matches: impl AsRef<[TokenType]>) -> bool;
+    fn matches(self, kind: impl AsRef<TokenType>) -> Option<Self>
+    where
+        Self: Sized,
+    {
+        if self.is(kind) {
+            return Some(self);
+        }
+        None
+    }
+    fn ref_matches(&self, kind: impl AsRef<TokenType>) -> Option<&Self> {
+        if self.is(kind) {
+            return Some(self);
+        }
+        None
+    }
     /// Determines if the token is significant.
     ///
     /// Tokens that are of kind [`TokenType::Space`], [`TokenType::Space`], [`TokenType::NewLine`] arent significant.
@@ -72,7 +95,7 @@ pub trait TokenEq {
         self.isnt_any(&[TokenType::Comment, TokenType::Space, TokenType::NewLine])
     }
     /// Inverse of [`Self::is`].
-    fn isnt(&self, kind: &TokenType) -> bool {
+    fn isnt(&self, kind: impl AsRef<TokenType>) -> bool {
         return !self.is(kind);
     }
     /// Inverse of [`Self::is_significant`].
@@ -83,21 +106,26 @@ pub trait TokenEq {
     fn isnt_any(&self, matches: impl AsRef<[TokenType]>) -> bool {
         return !self.is_any(matches);
     }
+    fn is_delimiter(&self) -> bool {
+        return self.is(TokenType::Lesser)
+            || self.is(TokenType::LCloser)
+            || self.is(TokenType::End);
+    }
+    fn exists(&self) -> bool {
+        return self.isnt(&TokenType::Eof);
+    }
 }
 impl Token {
     pub fn new(kind: TokenType, span: Span) -> Self {
         Token { kind, span }
-    }
-    pub fn exists(&self) -> bool {
-        return self.isnt(&TokenType::Eof);
     }
 }
 impl TokenEq for Token {
     fn is_any(&self, matches: impl AsRef<[TokenType]>) -> bool {
         matches.as_ref().contains(&self.kind)
     }
-    fn is(&self, kind: &TokenType) -> bool {
-        &self.kind == kind
+    fn is(&self, kind: impl AsRef<TokenType>) -> bool {
+        &self.kind == kind.as_ref()
     }
 }
 
@@ -108,9 +136,9 @@ impl TokenEq for Option<Token> {
         };
         kind.is_any(matches.as_ref())
     }
-    fn is(&self, kind: &TokenType) -> bool {
-        match self.clone() {
-            Some(tok) => &tok.kind == kind,
+    fn is(&self, kind: impl AsRef<TokenType>) -> bool {
+        match &self {
+            Some(tok) => &tok.kind == kind.as_ref(),
             None => false,
         }
     }

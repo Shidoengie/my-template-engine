@@ -157,10 +157,7 @@ impl<'a> Lexer<'a> {
             self.new_span(self.index - 1, self.index),
         ))
     }
-    fn push_advance(&mut self, kind: TokenType, range: Span) -> Token {
-        self.advance();
-        Token::new(kind, range)
-    }
+
     fn multi_char_token(
         &mut self,
         expected: char,
@@ -169,12 +166,13 @@ impl<'a> Lexer<'a> {
         range_start: usize,
     ) -> Result {
         if self.current_is(expected) {
-            return Ok(self.push_advance(long_token, self.new_span(range_start, self.index)));
+            let range = self.new_span(range_start, range_start + 2);
+            self.advance();
+            let token = Token::new(long_token, range);
+            return Ok(token);
         }
-        Ok(Token::new(
-            short_token,
-            self.new_span(range_start, range_start + 1),
-        ))
+        let token = Token::new(short_token, self.new_span(range_start, range_start + 1));
+        Ok(token)
     }
 
     fn ident_or_num(&mut self, expected: char) -> Result {
@@ -281,7 +279,7 @@ impl<'a> Lexer<'a> {
                 return Ok(Token::new(TokenType::Minus, range));
             }
             '>' => just(T::Greater),
-            '/' => just(T::Slash),
+            '/' => self.multi_char_token('>', T::Slash, T::RCloser, start),
             '=' => just(T::Equal),
             '<' => self.lex_lesser_token(range),
             last => self.ident_or_num(last),
@@ -293,8 +291,12 @@ impl<'a> Lexer<'a> {
         };
 
         if peeked != '>' {
-            return Ok(Token::new(TokenType::Lesser, range));
+            let span = self.new_span(range.start, self.index);
+            let token = Token::new(TokenType::LCloser, span);
+            self.advance();
+            return Ok(token);
         }
+
         self.advance();
         self.advance();
         let mut span = range;
