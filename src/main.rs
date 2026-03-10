@@ -40,7 +40,15 @@ fn display_if_ok<T: Display, E>(result: Result<T, E>) {
 /// `is_expr` should be true for REPL-like single expressions.
 fn run_stage(compiler: &mut Compiler, stage: &Stage, content: &str) {
     match stage {
-        Stage::Lexer => print_if_ok(compiler.lex(content)),
+        Stage::Lexer => {
+            let Ok(tokens) = compiler.lex(content) else {
+                return;
+            };
+            for token in tokens {
+                let token_value = content[token.span.start..token.span.end].to_string();
+                println!("{token:?} = {token_value:?}");
+            }
+        }
         Stage::Ast => print_if_ok(compiler.parse(content)),
     }
 }

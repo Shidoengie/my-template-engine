@@ -1,5 +1,5 @@
 use crate::{
-    lang_errors::{LangError, MsgBuilder},
+    lang_errors::{LangMessage, MsgBuilder},
     spans::*,
 };
 #[derive(Debug)]
@@ -11,7 +11,7 @@ pub enum LexError {
     InvalidEscape,
     UnexpectedStreamEnd,
 }
-impl LangError for Spanned<LexError> {
+impl LangMessage for Spanned<LexError> {
     fn msg(&'_ self) -> ariadne::Report<'_, Span> {
         use LexError as Le;
         match self.item {

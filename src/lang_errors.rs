@@ -1,14 +1,47 @@
-use std::fmt::{Debug, Display};
+use std::{
+    error::Error,
+    fmt::{Debug, Display},
+};
 
 use crate::spans::*;
 use ariadne::{Label, Report, ReportBuilder};
-pub trait LangError
+pub trait LangMessage
 where
     Self: SpanUtil + Debug,
 {
     fn msg(&'_ self) -> Report<'_, Span>;
 }
-
+#[derive(Debug)]
+pub enum LangError {
+    Compiler(Box<dyn LangMessage>),
+    Io(std::io::Error),
+    Serde(serde_json::Error),
+    Other(Box<dyn std::error::Error>),
+}
+impl<T: LangMessage + 'static> From<T> for LangError {
+    fn from(value: T) -> Self {
+        let val = Box::new(value);
+        Self::Compiler(val)
+    }
+}
+impl From<std::io::Error> for LangError {
+    fn from(value: std::io::Error) -> Self {
+        Self::Io(value)
+    }
+}
+impl From<Box<dyn std::error::Error>> for LangError {
+    fn from(value: Box<dyn std::error::Error>) -> Self {
+        Self::Other(value)
+    }
+}
+impl From<serde_json::Error> for LangError {
+    fn from(value: serde_json::Error) -> Self {
+        if let Some(err) = value.io_error_kind() {
+            return Self::Io(err.into());
+        }
+        Self::Serde(value)
+    }
+}
 pub struct MsgBuilder<'a> {
     inner: ReportBuilder<'a, Span>,
     span: Span,
@@ -59,4 +92,4 @@ impl<'a> MsgBuilder<'a> {
         self
     }
 }
-pub type LangResult<T> = Result<T, Box<dyn LangError>>;
+pub type LangResult<T> = Result<T, LangError>;

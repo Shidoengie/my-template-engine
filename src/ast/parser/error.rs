@@ -1,6 +1,6 @@
-use ariadne::{Color, Label, Report};
+use ariadne::{Color, ColorGenerator, Label, Report};
 
-use crate::lang_errors::{LangError, MsgBuilder};
+use crate::lang_errors::{LangMessage, MsgBuilder};
 use crate::lexemes::tokens::TokenType;
 use crate::spans::{Span, Spanned};
 #[derive(Clone, Debug)]
@@ -14,8 +14,41 @@ pub enum ParseError {
     },
     UnexpectedStreamEnd,
 }
+impl Spanned<ParseError> {
+    fn unmatched_tag_error(
+        &self,
+        start_tag: &Spanned<String>,
+        end_tag: &Spanned<String>,
+    ) -> Report<'_, Span> {
+        let start_tag_name = &start_tag.item;
+        let end_tag_name = &end_tag.item;
+        let builder = MsgBuilder::build_err(
+            format!("The end tag '{end_tag_name}' does not match the start tag '{end_tag_name}'",),
+            end_tag.span,
+        )
+        .get_inner();
 
-impl LangError for Spanned<ParseError> {
+        builder
+            .with_label(
+                Label::new(start_tag.span)
+                    .with_color(Color::Fixed(210))
+                    .with_message("This tag"),
+            )
+            .with_label(
+                Label::new(end_tag.span)
+                    .with_color(Color::Fixed(210))
+                    .with_message("And this tag"),
+            )
+            .with_label(
+                Label::new(self.span)
+                    .with_color(Color::Red)
+                    .with_message("These tags should match."),
+            )
+            .with_help(format!("Rename '{end_tag_name}' to '{start_tag_name}'."))
+            .finish()
+    }
+}
+impl LangMessage for Spanned<ParseError> {
     fn msg(&'_ self) -> Report<'_, Span> {
         use ParseError as Pe;
         match &self.item {
@@ -24,35 +57,7 @@ impl LangError for Spanned<ParseError> {
                     .with_err_label(format!("Expected this token to be {expected:?}."))
                     .finish()
             }
-            Pe::UnmatchedTag { start_tag, end_tag } => {
-                let start_tag_name = &start_tag.item;
-                let end_tag_name = &end_tag.item;
-                MsgBuilder::build_err(
-                    format!(
-                        "The end tag '{end_tag_name}' does not match the start tag '{end_tag_name}'",
-                        
-                    ),
-                    end_tag.span,
-                )
-                .get_inner()
-                .with_label(
-                    Label::new(start_tag.span)
-                        .with_color(Color::Red)
-                        .with_message("This tag"),
-                )
-                .with_label(
-                    Label::new(end_tag.span)
-                        .with_color(Color::Red)
-                        .with_message("And this tag"),
-                )
-                .with_label(
-                    Label::new(self.span)
-                        .with_color(Color::Red)
-                        .with_message("These tags should match."),
-                )
-                .with_help(format!("Rename '{start_tag_name}' to '{end_tag_name}'."))
-                .finish()
-            }
+            Pe::UnmatchedTag { start_tag, end_tag } => self.unmatched_tag_error(start_tag, end_tag),
             Pe::UnexpectedToken(got) => {
                 MsgBuilder::build_err(format!("Unexpected token '{got:?}'"), self.span)
                     .with_err_label("This should not be here.")

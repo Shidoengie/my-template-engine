@@ -1,9 +1,10 @@
 use super::tokens::*;
 use crate::charvec::CharVec;
-use crate::lang_errors::{LangError, LangResult};
+use crate::lang_errors::{LangMessage, LangResult};
 use crate::lexemes::*;
 use crate::spans::{FileID, IntoSpanned, Span, Spanned};
 use std::fmt::Write;
+use std::future;
 use std::str::Chars;
 mod error;
 
@@ -15,18 +16,35 @@ pub struct Lexer<'a> {
     chars: Chars<'a>,
     source: String,
     pub(crate) index: usize,
+    lex_whitespace: bool,
+    lex_comments: bool,
 }
 impl<'a> Lexer<'a> {
     pub(crate) fn peek_char(&self) -> Option<char> {
         self.chars.clone().next()
     }
+    fn skip(&mut self,n:usize) {
+        for _ in 0..n {
+            self.advance();
+        }
+
+    }
     fn peek_advance(&mut self) -> Option<char> {
         self.advance();
         self.peek_char()
     }
+    fn future_matches(&self, sequence: &str) -> bool {
+        let chars = self.chars.clone();
+        for (matched, peeked) in sequence.chars().zip(chars) {
+            if matched != peeked {
+                return false;
+            }
+        }
+        return true;
+    }
     fn make_error<T>(&self, err: LexError, start: usize, stop: usize) -> Result<T> {
         let inner = err.to_spanned(self.new_span(start, stop));
-        Err(Box::new(inner) as Box<_>)
+        Err(inner.into())
     }
     fn peek_next_char(&mut self) -> Option<char> {
         let mut cur_chars = self.chars.clone();
@@ -53,7 +71,8 @@ impl<'a> Lexer<'a> {
     fn new_span(&self, start: usize, end: usize) -> Span {
         Span::new(self.file_id, start, end)
     }
-
+}
+impl<'a> Lexer<'a> {
     fn lex_number(&mut self) -> Result {
         let mut dot_count: u16 = 0;
         let start = self.index;
@@ -97,7 +116,7 @@ impl<'a> Lexer<'a> {
         let start = self.index - 1;
         let mut current = self.peek_char();
         while let Some(value) = current {
-            if value.is_alphanumeric() || value == '_' {
+            if value.is_alphanumeric() || value == '_' || value == '-' || value == ':' {
                 current = self.peek_advance();
                 continue;
             }
@@ -185,7 +204,8 @@ impl<'a> Lexer<'a> {
         }
         self.make_error(LexError::UnexpectedChar(expected), start - 1, start)
     }
-
+}
+impl<'a> Lexer<'a> {
     fn multi_comment(&mut self) -> Result {
         self.consume_char('*')?;
         let mut nest = 1;
@@ -228,23 +248,105 @@ impl<'a> Lexer<'a> {
                 }
             }
         }
-        return Ok(Token::new(TokenType::Comment, self.new_span(start, end)));
-    }
-
-    pub fn new(src: &'a str, file_id: FileID) -> Self {
-        Self {
-            file_id,
-            chars: src.chars(),
-            source: String::from(src),
-            index: 0,
+       if self.lex_comments {
+            return Ok(Token::new(TokenType::Comment, self.new_span(start, end)));
+        } else {
+            return self.next();
         }
     }
+    fn lex_html_comment(&mut self) -> Result {
+        self.skip(3);
+        let mut nest = 1;
+        let start = self.index;
+        let mut end = self.index;
+        while nest >= 1 {
+            let Some(peeked) = self.peek_char() else {
+                break;
+            };
+            match peeked {
+                '-' if self.future_matches("-->") => {
+                    self.skip(3);
+                    
+                    nest -= 1;
+                }
+                '<' if self.future_matches("<!--") => {
+                    self.skip(4);
+                    nest += 1;
+                }
+                _ => {
+                    end = self.index + 1;
+                    self.advance();
+                }
+            }
+        }
+        if self.lex_comments {
+            return Ok(Token::new(TokenType::Comment, self.new_span(start, end)));
+        } else {
+            return self.next();
+        }
+    }   
+   
+}
+impl<'a> Lexer<'a> {
+    fn lex_whitespace(&mut self, ch: char, start: usize) -> Result {
+        if !self.lex_whitespace {
+            return self.next();
+        }
+        use TokenType as T;
+        let just =
+            |tk: TokenType| -> Result { Ok(Token::new(tk, self.new_span(start, start + 1))) };
+        match ch {
+            '\r' => self.multi_char_token('\n', T::Space, T::NewLine, start),
+            '\n' => just(T::NewLine),
+            ' ' | '\t' => just(T::Space),
+            '\u{200B}'|'\u{202A}' | '\u{202B}' | '\u{202C}' | '\u{202D}' | '\u{202E}' | // Emedding/Override
+'\u{2066}' | '\u{2067}' | '\u{2068}' | '\u{2069}' => self.next(),
+            
+            _ => just(T::Space),
+        }
+    }
+    
+    fn lex_end_token(&mut self, range: Span) -> Result {
+        let Some(peeked) = self.peek_next_char() else {
+            return Ok(Token::new(TokenType::Lesser, range));
+        };
 
+        if peeked != '>' {
+            let span = self.new_span(range.start, self.index + 1);
+            let token = Token::new(TokenType::LCloser, span);
+            self.advance();
+            return Ok(token);
+        }
+
+        self.advance();
+        self.advance();
+        let mut span = range;
+        span.end = self.index;
+        return Ok(Token::new(TokenType::End, span));
+    }
+     fn lex_lesser_token(&mut self, range: Span) -> Result {
+        let Some(peeked) = self.peek_char() else {
+            return Ok(Token::new(TokenType::Lesser, range));
+        };
+        if self.future_matches("!--") {
+            return self.lex_html_comment();
+        }
+        match peeked {
+            '*' => self.multi_comment(),
+            '/' => self.lex_end_token(range),
+            _ => Ok(Token::new(TokenType::Lesser, range)),
+        }
+    }
+    }
+impl<'a> Lexer<'a> {
     fn token_from_char(&mut self, ch: char, start: usize) -> Result {
         use TokenType as T;
-
+        
         let range = self.new_span(start, start + 1);
         let just = |tk: TokenType| -> Result { Ok(Token::new(tk, range)) };
+        if ch.is_whitespace() {
+            return self.lex_whitespace(ch, start);
+        }
         match ch {
             '.' => just(T::Dot),
             ',' => just(T::Comma),
@@ -265,11 +367,9 @@ impl<'a> Lexer<'a> {
             '?' => just(T::Question),
             '!' => just(T::Bang),
 
-            '\r' => self.multi_char_token('\n', T::Space, T::NewLine, start),
-            '\n' => just(T::NewLine),
-            ' ' | '\t' => just(T::Space),
             '*' => just(T::Star),
             '-' => {
+
                 let Some(peeked) = self.peek_char() else {
                     return Ok(Token::new(TokenType::Minus, range));
                 };
@@ -282,35 +382,8 @@ impl<'a> Lexer<'a> {
             '/' => self.multi_char_token('>', T::Slash, T::RCloser, start),
             '=' => just(T::Equal),
             '<' => self.lex_lesser_token(range),
+
             last => self.ident_or_num(last),
-        }
-    }
-    fn lex_end_token(&mut self, range: Span) -> Result {
-        let Some(peeked) = self.peek_next_char() else {
-            return Ok(Token::new(TokenType::Lesser, range));
-        };
-
-        if peeked != '>' {
-            let span = self.new_span(range.start, self.index);
-            let token = Token::new(TokenType::LCloser, span);
-            self.advance();
-            return Ok(token);
-        }
-
-        self.advance();
-        self.advance();
-        let mut span = range;
-        span.end = self.index;
-        return Ok(Token::new(TokenType::End, span));
-    }
-    fn lex_lesser_token(&mut self, range: Span) -> Result {
-        let Some(peeked) = self.peek_char() else {
-            return Ok(Token::new(TokenType::Lesser, range));
-        };
-        match peeked {
-            '*' => self.multi_comment(),
-            '/' => self.lex_end_token(range),
-            _ => Ok(Token::new(TokenType::Lesser, range)),
         }
     }
     pub fn peek_next(&mut self) -> Result {
@@ -336,6 +409,26 @@ impl<'a> Lexer<'a> {
             return self.make_eof_token();
         };
 
-        self.token_from_char(last, start)
+        self.token_from_char(last, start)   
+    }
+    pub fn toggle_whitespace(&mut self,value:bool) {
+        self.lex_whitespace = value;
+    }
+    pub fn toggle_comments(&mut self,value:bool) {
+        self.lex_comments = value;
+    }
+    pub fn toggle_unsignificant(&mut self,value:bool) {
+        self.lex_whitespace = value;
+        self.lex_comments = value;
+    }
+    pub fn new(src: &'a str, file_id: FileID) -> Self {
+        Self {
+            file_id,
+            chars: src.chars(),
+            source: String::from(src),
+            index: 0,
+            lex_whitespace: true,
+            lex_comments:true
+        }
     }
 }

@@ -1,35 +1,32 @@
-use std::{clone, collections::HashMap};
+use std::{
+    clone,
+    collections::HashMap,
+    error::Error,
+    fs::File,
+    io::{self, BufReader},
+    os::raw,
+    path::Path,
+};
 
 use crate::{
-    ast::nodes::*,
-    lang_errors::LangError,
+    ast::{nodes::*, schema::ElementSchema},
+    lang_errors::{LangError, LangMessage, LangResult},
     lexemes::{lexer::Lexer, tokens::*},
     spans::{FileID, IntoSpanned, Span, Spanned},
 };
 
 mod error;
-use chumsky::{container::Container, prelude::todo};
 use error::*;
-use rayon::vec;
-macro_rules! str_vec {
-    ($($word:ident),*) => {
-        vec![
-            $(
-                stringify!($word).to_owned(),
-            )*
-        ]
-    };
-}
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct Parser<'input> {
     file_id: FileID,
     input: &'input str,
     tokens: Lexer<'input>,
-    pub raw_tags: Vec<String>,
+    pub schema: ElementSchema,
 }
-pub type Result<T = Spanned<Node>> = std::result::Result<T, Box<dyn LangError>>;
-fn err<T>(value: impl LangError + 'static) -> Result<T> {
-    Err(Box::new(value))
+pub type Result<T = Spanned<Node>> = LangResult<T>;
+fn err<T>(value: impl LangMessage + 'static) -> Result<T> {
+    Err(value.into())
 }
 impl<'input> Parser<'input> {
     /// converts token spans into text
@@ -94,6 +91,13 @@ impl<'input> Parser<'input> {
         }
         Ok(buffer)
     }
+    fn significant_only(&mut self) {
+        self.tokens.toggle_unsignificant(false);
+    }
+
+    fn allow_unsignificant(&mut self) {
+        self.tokens.toggle_unsignificant(false);
+    }
     fn next(&mut self) -> Result<Token> {
         self.tokens.next()
     }
@@ -136,15 +140,16 @@ impl<'input> Parser<'input> {
         self.next()?;
         Ok(self.text(&token))
     }
-    pub fn parse_raw_text(&mut self) -> Result {
+    pub fn parse_raw_content(&mut self) -> Result {
         let mut buffer = String::new();
         let start_index = self.tokens.index;
         while let Some(ch) = self.tokens.peek_char() {
-            if ch == '<' {
-                break;
+            if ch != '<' {
+                buffer.push(ch);
+                self.tokens.advance();
+                continue;
             }
-            buffer.push(ch);
-            self.tokens.advance();
+            dbg!(self.peek());
         }
         let end_index = self.tokens.index;
         let span = Span::new(self.file_id, start_index, end_index);
@@ -182,7 +187,6 @@ impl<'input> Parser<'input> {
         let mut props: HashMap<String, Spanned<Value>> = HashMap::new();
 
         while let Some(_) = self.peek_opt()? {
-            self.skip_unsignificant()?;
             let token = self.peek()?;
             if token.is(TokenType::RCloser) {
                 break;
@@ -192,19 +196,20 @@ impl<'input> Parser<'input> {
             }
 
             let prop_name = self.consume_word()?;
-            self.skip_unsignificant()?;
+            //self.skip_unsignificant()?;
             let sign = self.peek()?;
             if sign.isnt(&TokenType::Equal) {
                 props.insert(prop_name, Value::Bool(true).to_spanned(sign.span));
                 continue;
             }
             self.next()?;
-            self.skip_unsignificant()?;
+            //self.skip_unsignificant()?;
             let value_token = self.peek()?;
             let value = self.parse_value(&value_token)?;
             self.next()?;
             props.insert(prop_name, value);
         }
+
         return Ok(props);
     }
     fn parse_content(&mut self, raw: bool) -> Result<Vec<Spanned<Node>>> {
@@ -224,54 +229,93 @@ impl<'input> Parser<'input> {
         }
         Ok(children)
     }
+}
+impl<'input> Parser<'input> {
     fn parse_element(&mut self) -> Result {
+        self.significant_only();
         let next = self.peek_next()?;
         if !next.exists() || next.is(&TokenType::Greater) {
-            let token = self.next()?;
-            let text = self.text(&token);
-            let node = Node::Text(text).to_spanned(token.span);
-            return Ok(node);
+            return self.handle_immediate_greater();
         }
 
         let start = self.next()?;
         let tag_name = self.consume_word()?;
 
-        let parse_raw = self.raw_tags.contains(&tag_name);
-        self.skip_unsignificant()?;
+        let parse_raw = if let Some(rules) = self.schema.get_rule(&tag_name) {
+            rules.parse_raw
+        } else {
+            false
+        };
+
         if self.peek()?.is(TokenType::RCloser) {
-            let end = self.next()?;
-            let element = Element {
-                name: tag_name,
-                props: HashMap::new(),
-                children: vec![],
-                start_tag_span: start.span + end.span,
-                end_tag_span: None,
-            };
-            return Ok(Node::Element(element).to_spanned(start.span + end.span));
+            return self.handle_empty_element(start.span, tag_name);
         }
+
         let props = self.parse_props()?;
+
         if let Some(end) = self.peek()?.matches(TokenType::RCloser) {
             self.next()?;
-            let element = Element {
-                name: tag_name,
-                props,
-                children: vec![],
-                start_tag_span: start.span + end.span,
-                end_tag_span: None,
-            };
-
-            return Ok(Node::Element(element).to_spanned(start.span + end.span));
+            return self.handle_self_closing_with_props(start.span, tag_name, props, end.span);
         }
+
         let start_tag_span = {
             let token = self.next()?;
             start.span + token.span
         };
+        self.allow_unsignificant();
         let children = self.parse_content(parse_raw)?;
         let end_start = self.next()?;
+        return self.finish_element(
+            tag_name,
+            start.span,
+            start_tag_span,
+            props,
+            children,
+            end_start,
+        );
+    }
+
+    fn handle_immediate_greater(&mut self) -> Result {
+        let token = self.next()?;
+        let text = self.text(&token);
+        let node = Node::Text(text).to_spanned(token.span);
+        self.allow_unsignificant();
+        Ok(node)
+    }
+
+    fn handle_empty_element(&mut self, start_span: Span, tag_name: String) -> Result {
+        let end = self.next()?;
+        let element = ElementBuilder::new(&tag_name, start_span + end.span)
+            .finish_node(start_span + end.span);
+        Ok(element)
+    }
+
+    fn handle_self_closing_with_props(
+        &mut self,
+        start_span: Span,
+        tag_name: String,
+        props: HashMap<String, Spanned<Value>>,
+        end_span: Span,
+    ) -> Result {
+        let element = ElementBuilder::new(&tag_name, start_span + end_span)
+            .with_props(props)
+            .finish_node(start_span + end_span);
+        Ok(element)
+    }
+
+    fn finish_element(
+        &mut self,
+        tag_name: String,
+        start_span: Span,
+        start_tag_span: Span,
+        props: HashMap<String, Spanned<Value>>,
+        children: Vec<Spanned<Node>>,
+        end_start: Token,
+    ) -> Result {
+        self.significant_only();
         if end_start.is(TokenType::LCloser) {
-            self.skip_unsignificant()?;
             let end_tagname = self.consume_word()?;
-            self.skip_unsignificant()?;
+
             let end = self.consume(TokenType::Greater)?;
             let end_tag_span = end_start.span + end.span;
             if end_tagname != tag_name {
@@ -279,36 +323,38 @@ impl<'input> Parser<'input> {
                     start_tag: tag_name.to_spanned(start_tag_span),
                     end_tag: end_tagname.to_spanned(end_tag_span),
                 };
-                return err(error.to_spanned(start.span + end.span));
+                return err(error.to_spanned(start_span + end.span));
             }
         }
-        let element = Element {
-            name: tag_name,
-            props,
-            children,
-            start_tag_span,
-            end_tag_span: Some(end_start.span),
-        };
+        let element = ElementBuilder::new(tag_name, start_tag_span)
+            .with_props(props)
+            .with_children(children)
+            .with_end_tag_span(end_start.span)
+            .finish_node(start_span + end_start.span);
 
-        return Ok(Node::Element(element).to_spanned(start.span + end_start.span));
+        Ok(element)
     }
+}
+impl<'input> Parser<'input> {
     fn parse_value(&mut self, token: &Token) -> Result<Spanned<Value>> {
-        let value = match &token.kind {
-            TokenType::False => Ok(Value::Bool(false)),
+        let value: Result<Value> = match &token.kind {
             TokenType::True => Ok(Value::Bool(true)),
+            TokenType::False => Ok(Value::Bool(false)),
             TokenType::Null => Ok(Value::Null),
             TokenType::Float => Ok(self.parse_float(token)),
             TokenType::Int => Ok(self.parse_int(token)),
             TokenType::Str(txt) => Ok(Value::String(txt.to_string())),
             foo => {
                 dbg!(foo);
-                todo!();
+                todo!()
             }
-        }?;
+        };
+        let value = value?;
         Ok(value.to_spanned(token.span))
     }
     fn parse_expr(&mut self, raw: bool) -> Result {
         let peeked = self.peek()?;
+
         match peeked.kind {
             TokenType::Lesser => self.parse_element(),
             TokenType::Comment => {
@@ -317,31 +363,42 @@ impl<'input> Parser<'input> {
                 return Ok(Node::Comment(text).to_spanned(peeked.span));
             }
 
-            _ if raw => self.parse_raw_text(),
+            _ if raw => self.parse_raw_content(),
             _ => self.parse_text(),
         }
     }
 }
+
 impl<'input> Parser<'input> {
-    pub fn make(input: &'input str, file_id: FileID, raw_tags: Vec<String>) -> Self {
+    pub fn make(input: &'input str, file_id: FileID, schema: ElementSchema) -> Self {
         Parser {
             file_id,
             input,
             tokens: Lexer::new(input, file_id),
-            raw_tags,
+            schema,
         }
     }
+
     pub fn new(input: &'input str, file_id: FileID) -> Self {
-        let raw_tags = str_vec!(pre, raw, script, style);
         Parser {
             file_id,
             input,
-            raw_tags,
+            schema: ElementSchema::new(),
             tokens: Lexer::new(input, file_id),
         }
     }
-    pub fn parse(input: &'input str, file_id: FileID) -> Result<Vec<Spanned<Node>>> {
-        let mut parser = Self::new(input, file_id);
-        parser.parse_content(false)
+    pub fn with_schema(self, schema: ElementSchema) -> Self {
+        Self { schema, ..self }
     }
+    pub fn with_schema_file(self, path: impl AsRef<Path>) -> Result<Self> {
+        let schema = ElementSchema::from_file(path)?;
+        Ok(Self { schema, ..self })
+    }
+    pub fn parse(&mut self) -> Result<Vec<Spanned<Node>>> {
+        self.parse_content(false)
+    }
+}
+pub fn parse(input: &str, file_id: FileID, schema: ElementSchema) -> Result<Vec<Spanned<Node>>> {
+    let mut parser = Parser::new(input, file_id).with_schema(schema);
+    parser.parse_content(false)
 }
